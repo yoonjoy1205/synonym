@@ -8,6 +8,7 @@ import pandas as pd
 
 # --- OpenAI (latest official SDK style) ---
 from openai import OpenAI
+from openai import RateLimitError, AuthenticationError, BadRequestError
 
 
 # =========================
@@ -116,25 +117,27 @@ def extract_keywords_simple(text: str, max_keywords: int = 10) -> List[str]:
 # =========================
 def call_llm_chat(client: OpenAI, messages: List[Dict[str, str]]) -> str:
     """
-    messages: [{"role":"system|user|assistant","content":"..."}]
+    표준 Chat Completions API만 사용해 간결하게 응답을 생성합니다.
     """
-    # Prefer Responses API (newer). Fallback to Chat Completions if needed.
     try:
-        resp = client.responses.create(
-            model="gpt-4o-mini",
-            input=messages,
-            temperature=0.4,
-        )
-        # Responses API returns output_text aggregated
-        return (resp.output_text or "").strip()
-    except Exception:
-        # Fallback (older style)
-        cc = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.4,
         )
-        return (cc.choices[0].message.content or "").strip()
+        return (response.choices[0].message.content or "").strip()
+    except RateLimitError:
+        st.error("🚫 OpenAI API 쿼터가 부족합니다. (충전된 크레딧 잔액을 확인하세요)")
+        st.stop()
+    except AuthenticationError:
+        st.error("🚫 OpenAI API 키가 유효하지 않습니다. .streamlit/secrets.toml의 OPENAI_API_KEY를 확인하세요.")
+        st.stop()
+    except BadRequestError as e:
+        st.error(f"요청 형식 오류: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"오류 발생: {e}")
+        st.stop()
 
 
 def call_llm_json(client: OpenAI, sentence: str, keywords: List[str], max_syn: int = 8) -> List[Dict[str, Any]]:
@@ -216,7 +219,7 @@ def to_table_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # =========================
 # UI
 # =========================
-st.title("유의어 & 품사변화 정리 챗봇 (GPT-4o-mini)")
+st.title("🔑유의어 & 품사변화 정리 챗봇")
 
 # Initialize client (fail fast with a clear message)
 try:
@@ -278,6 +281,15 @@ with tab2:
 
         st.write("추출 키워드:", ", ".join(keywords))
 
+        SAMPLE_SENTENCE = "the government implemented a new policy to protect the environment."  # lowercase 비교용
+        SAMPLE_ROWS = [
+            {"Keyword": "government", "POS": "NOUN", "Synonyms": "administration, authority, regime, state", "Deriv(N)": "", "Deriv(V)": "", "Deriv(Adj)": "governmental", "Deriv(Adv)": ""},
+            {"Keyword": "implement", "POS": "VERB", "Synonyms": "execute, carry out, enforce, apply", "Deriv(N)": "implementation, implement", "Deriv(V)": "", "Deriv(Adj)": "implementable", "Deriv(Adv)": ""},
+            {"Keyword": "policy", "POS": "NOUN", "Synonyms": "strategy, guideline, measure, rule", "Deriv(N)": "", "Deriv(V)": "", "Deriv(Adj)": "policy-related, policy-driven", "Deriv(Adv)": ""},
+            {"Keyword": "protect", "POS": "VERB", "Synonyms": "safeguard, defend, preserve, secure", "Deriv(N)": "protection, protector", "Deriv(V)": "", "Deriv(Adj)": "protective, protected", "Deriv(Adv)": ""},
+            {"Keyword": "environment", "POS": "NOUN", "Synonyms": "surroundings, setting, habitat, ecosystem", "Deriv(N)": "", "Deriv(V)": "", "Deriv(Adj)": "environmental", "Deriv(Adv)": "environmentally"},
+        ]
+
         try:
             with st.spinner("GPT로 유의어/품사변화 분석 중..."):
                 items = call_llm_json(client, s, keywords, max_syn=max_syn)
@@ -286,5 +298,12 @@ with tab2:
             st.subheader("결과 표")
             st.dataframe(df, use_container_width=True)
         except Exception as e:
-            st.error(f"분석 중 오류: {e}")
-            st.info("모델이 JSON 형식을 어기면 오류가 날 수 있습니다. 다시 시도하거나 문장을 조금 바꿔보세요.")
+            # Fallback: 기본 예시 문장일 때 샘플 표 표시
+            if s.lower() == SAMPLE_SENTENCE:
+                st.warning("모델 호출에 실패했습니다. 샘플 표를 대신 표시합니다.")
+                df = pd.DataFrame(SAMPLE_ROWS)
+                st.subheader("결과 표 (샘플)")
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.error(f"분석 중 오류: {e}")
+                st.info("모델이 JSON 형식을 어기면 오류가 날 수 있습니다. 다시 시도하거나 문장을 조금 바꿔보세요.")
