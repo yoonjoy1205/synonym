@@ -51,12 +51,12 @@ Rules:
 
 # 단어뜻 정리 전용 시스템 프롬프트
 SYSTEM_VOCAB_PROMPT = """You are an English vocabulary assistant for Korean learners.
-Given a list of English words, return JSON ONLY (no markdown) as an array:
+Given a list of English words and OPTIONAL sentence context, return JSON ONLY (no markdown) as an array:
 [
     {
         "word": "...",
         "pos": "NOUN|VERB|ADJ|ADV|OTHER",
-        "meaning_ko": "간결한 한국어 뜻 (핵심만)",
+        "meaning_ko": "간결한 한국어 뜻 (핵심만, 문맥에 맞게)",
         "synonyms": ["...", "..."],
         "examples": ["짧은 예문 1", "짧은 예문 2"],
         "derivations": {
@@ -68,7 +68,7 @@ Given a list of English words, return JSON ONLY (no markdown) as an array:
     }
 ]
 Rules:
-- Keep meanings short and accurate in Korean.
+- Keep meanings short and accurate in Korean; if sentence is provided, prefer context-appropriate senses.
 - Provide 2-4 context-appropriate synonyms if available.
 - Provide 1-2 short, simple example sentences.
 - If any field is not applicable, use an empty list or empty string.
@@ -207,7 +207,7 @@ def delete_wordbook_entry(username: str, entry_id: str):
     data = [e for e in data if str(e.get("id")) != str(entry_id)]
     save_wordbook(username, data)
 
-def record_vocab_from_vocab_items(username: str, items: List[Dict[str, Any]]):
+def record_vocab_from_vocab_items(username: str, items: List[Dict[str, Any]], sentence: str = ""):
     now = datetime.utcnow().isoformat()
     entries = []
     for it in items:
@@ -222,7 +222,7 @@ def record_vocab_from_vocab_items(username: str, items: List[Dict[str, Any]]):
             "tags": [],
             "note": "",
             "source": "vocab",
-            "sentence": "",
+            "sentence": sentence,
             "timestamp": now,
         })
     append_wordbook(username, entries)
@@ -350,8 +350,8 @@ def call_llm_json(client: OpenAI, sentence: str, keywords: List[str], max_syn: i
     raise ValueError("분석 결과 JSON 파싱에 실패했습니다. (모델 출력 형식 오류)")
 
 
-def call_llm_vocab_json(client: OpenAI, words: List[str]) -> List[Dict[str, Any]]:
-    payload = {"words": words}
+def call_llm_vocab_json(client: OpenAI, words: List[str], sentence: str | None = None) -> List[Dict[str, Any]]:
+    payload = {"words": words, "sentence": sentence or ""}
 
     messages = [
         {"role": "system", "content": SYSTEM_VOCAB_PROMPT},
@@ -514,6 +514,37 @@ with tab1:
                 record_vocab_from_vocab_items(user_name, items)
             except Exception as e:
                 st.error(f"단어뜻 정리 중 오류: {e}")
+
+    # 문장 입력 → 자동 키워드 추출 → 문맥 맞춤 단어뜻 정리
+    st.markdown("---")
+    st.caption("문장을 입력하면 핵심 단어를 자동 추출하고, 문맥에 맞는 한국어 뜻으로 정리합니다.")
+    default_vocab_sentence = "The government implemented a new policy to protect the environment."
+    vocab_sentence = st.text_area("문장에서 자동 정리", value=default_vocab_sentence, height=80)
+    kcol1, kcol2 = st.columns([1,2])
+    with kcol1:
+        max_vocab_keywords = st.slider("키워드 수", 5, 20, 10)
+    run_vocab_auto = st.button("문장에서 자동 정리")
+
+    if run_vocab_auto:
+        s = (vocab_sentence or "").strip()
+        if not s:
+            st.error("문장을 입력하세요.")
+        else:
+            kws = extract_keywords_simple(s, max_keywords=max_vocab_keywords)
+            if not kws:
+                st.warning("추출된 키워드가 없습니다. 문장을 조금 더 길게 입력해보세요.")
+            else:
+                st.write("추출 키워드:", ", ".join(kws))
+                try:
+                    with st.spinner("문맥 맞춤 단어뜻 정리 중..."):
+                        items = call_llm_vocab_json(client, kws, sentence=s)
+                    vrows = to_vocab_rows(items)
+                    vdf = pd.DataFrame(vrows)
+                    st.dataframe(vdf, use_container_width=True)
+                    # 기록 저장 (문장 포함)
+                    record_vocab_from_vocab_items(user_name, items, sentence=s)
+                except Exception as e:
+                    st.error(f"자동 정리 중 오류: {e}")
 
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = [{"role": "system", "content": SYSTEM_CHAT_PROMPT}]
